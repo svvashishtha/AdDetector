@@ -1,277 +1,193 @@
 # ad-detector
 
-An AI model that distinguishes **ads from regular content on a TV**, running on an
-**edge device — an old Samsung Galaxy S21**. The phone sits in front of the TV,
-watching through its **camera and microphone**, and detects in real time when an ad
-is playing vs normal content.
+Real-time ad-vs-content detection that runs on a phone pointed at a TV.
 
-**Underlying motivation:** prove that old devices can be repurposed for useful,
-out-of-the-box ML tasks. Keep the budget low — free tools (Colab free tier,
-open-source libraries) wherever possible; spend only where genuinely necessary.
+A Samsung Galaxy S21 sits in front of a television, watches the screen through its
+camera and microphone, and classifies in real time whether an advertisement or normal
+programming is playing. Everything runs on-device.
 
-> This README is **authoritative** for system design and build order. `plan/` is an
-> execution log that references this ordering; if they ever disagree, this file wins.
-> See [Documentation model](#documentation--planning-model).
+The project is also a demonstration: a 2021 phone is enough to do useful, real-time ML
+at the edge. It is built to run on free tooling (Google Colab, open-source libraries)
+and commodity hardware.
 
----
+## Status
 
-## The core insight: one hard problem
+In development. The data-collection pipeline is designed and being built; the detection
+model is in design. See [Build order](#build-order) for sequencing and
+[`plan/`](plan/README.md) for live execution status.
 
-Broadcast-TV detection and in-app OTT detection (YouTube pre-rolls etc.) look like
-different problems but aren't. The real distinction is *what information you can access*:
+## How it works
 
-- **If you control the stream/player** (broadcaster, CDN, your own app): ad boundaries
-  are already known via stream metadata — SCTE-35 markers, HLS/DASH manifest tags, the
-  player's own ad state. No ML needed; you just read the signal. YouTube's "skip in 5s"
-  is the player reading its own ad flag, **not** computer vision.
-- **If you are an outside observer** (a phone watching someone else's screen): you get
-  **only pixels and audio, secondhand**. No metadata. This is a genuine ML inference
-  problem. (Expecting an app to expose ad signals to an external observer is naive —
-  it doesn't happen. DRM/FLAG_SECURE on OTT apps often blocks screen capture too.)
+The phone is an outside observer. It cannot read any app's internal ad state — it only
+has the pixels and audio coming off the screen, so detection has to be inferred from the
+signal itself. This is true whether the source is broadcast TV or a streaming app, which
+is why the project treats them as a single problem rather than two.
 
-**Our setup is the second case**, so broadcast vs OTT is irrelevant to us — it's all
-"signal-based detection from the outside," one hard problem.
+Detection is **audio-first**. Audio is far cheaper to process at the edge than video,
+and ads carry strong audio signatures — they are mastered louder, with compressed
+dynamic range and dense voiceover/jingles. A camera aimed at a screen, by contrast,
+fights glare, viewing angle, moiré, and refresh-rate flicker. Video is kept as a
+secondary signal (scene-cut rate, channel-logo and black-frame transitions) and only
+brought in if audio alone proves insufficient.
 
-## Signal strategy (locked)
+The classifier runs over short rolling audio windows, and predictions are smoothed over
+time so the output doesn't flicker at every scene cut. Steady state is easy; the
+ad/content boundary is the hard part, and it's the moment the system most needs to get
+right.
 
-**Audio is the primary signal. Video is secondary.**
+## Architecture
 
-- Audio classification is far lighter than video for edge devices.
-- Ads carry strong audio signatures: loudness-normalized higher, compressed dynamic
-  range, distinct jingles/voiceover density. The loudness/dynamic-range jump is the
-  single best cheap feature.
-- A camera pointed at a screen is noisy: glare, angle, moiré, refresh-rate flicker,
-  ambient light. Audio via mic is degraded by room acoustics but still **more reliable
-  than the camera** here.
+Two pipelines share one preprocessing definition.
 
-Video cues (weak confirm, used only if audio underperforms): faster scene-cut frequency
-during ads, black-frame/logo transitions at boundaries, channel logo ("bug")
-disappearing during ad breaks, on-screen "Ad" markers.
+**Collection** turns recordings into labeled training data:
 
-**Plan:** audio-only baseline first; add a video branch only if audio alone is
-insufficient. **But collect both audio and video from day one** — re-recording later
-because we skipped video is the expensive mistake; storage is cheap.
+```
+record → split → label (in parallel) → merge → normalize → slice → store
+```
 
-## Hardware: Samsung S21 (locked)
+A recording is split into ~30-minute, keyframe-aligned chunks so it can be labeled by
+more than one person at once. Labeling is done in a small browser tool (see
+[`labeler/`](labeler/README.md)): only ads are marked, and everything unmarked is
+treated as content. Labeled recordings are normalized to a constant frame rate and a
+fixed sample rate, then sliced into fixed-length windows that each inherit their label.
 
-The S21 is a 2021 flagship, not a weak device — capable GPU + dedicated NPU. This
-**removes compute as a constraint**. The real constraints are **data quality and
-accuracy**, not model size.
+**Detection** runs on the phone: capture → rolling audio window → preprocess →
+classifier → temporal smoothing → ad/content state.
 
-- **Runtime:** TFLite / LiteRT on Android. Mature, free, well-documented. NNAPI/GPU
-  delegates exist, but the audio model is tiny — CPU is likely plenty. Don't optimize
-  hardware acceleration early.
-- **Model options open up:** YAMNet embeddings + light head, or a small custom CNN on
-  log-mel spectrograms; even a small video branch (MobileNetV3-Lite) is feasible.
-- **The same phone does data collection and deployment.** This kills the domain-gap
-  problem: what we record (tinny TV-through-a-mic audio, camera-of-a-screen video) is
-  exactly what we infer on. No train/deploy mismatch.
+The two pipelines compute audio features from **the same code and the same config
+file**. Mismatched preprocessing between training and inference is the most common cause
+of a model that scores well offline and fails in the field; sharing one `audio.py` and
+one `config/pipeline.yaml` makes that mismatch structurally impossible.
 
-## Model approach (outlined, not locked)
+## Model
 
-- **v1:** binary audio classifier (ad vs content). Either YAMNet embeddings → small
-  classifier head (fastest path to a baseline), or a compact CNN on log-mel
-  spectrograms (more control). YAMNet is the lean first try; custom CNN is the fallback
-  if YAMNet's features don't separate ads well.
-- **Optional video branch later:** MobileNetV3-Lite on ~5fps sampled frames, fused with audio.
-- **Temporal smoothing:** classify rolling windows, then majority-vote / HMM over the
-  last N windows so output doesn't flicker at every scene cut. Steady state (mid-ad,
-  mid-content) is easy; **the transition/boundary is the hard part** and where errors
-  concentrate — and it's the moment we care about most.
-- **Deployment:** int8 quantization, TFLite. Target small (<5–10 MB) though the S21
-  doesn't force this.
+The first version is a binary audio classifier (ad vs content). Two candidate
+approaches: YAMNet embeddings feeding a small classifier head (fastest route to a
+baseline), or a compact CNN over log-mel spectrograms (more control). The model is
+exported to TFLite with int8 quantization for on-device inference.
 
-## v2 — parked, but build extensibly (locked as future goal)
+The S21 has a capable GPU and NPU, so model size is not the binding constraint — data
+quality and accuracy are. Hardware acceleration (NNAPI/GPU delegates) is available but
+unnecessary for a model this small; CPU inference is expected to be sufficient.
 
-TV ad inventory is **finite and repetitive**. Exploit it with a two-tier system
-(v2, NOT a change to the v1 classifier):
+Because the same phone is used for both collection and deployment, training data already
+contains the real-world degradation (through-the-mic audio, camera-of-a-screen video)
+the model meets at inference. There is no train/deploy domain gap to close separately.
 
-1. **Audio fingerprinting (Shazam-style):** library of known-ad fingerprints. Match
-   incoming audio → instant, near-certain hit on a *known* ad.
-2. **ML classifier fallback:** no fingerprint match → the classifier decides "is this
-   ad-like" — generalizes to *unseen* ads.
-3. **Auto-enrollment loop:** when the classifier confidently flags an unseen ad, add
-   its fingerprint to the library. Next time it's an instant tier-1 hit.
-
-**Why v2, not v1:** the fingerprinter is useless on day one (empty library — every ad
-is unseen). The classifier bootstraps the fingerprint collection.
-
-**Correction captured:** subtype labels and fingerprinting do NOT provide model
-*explainability* — the model learns its own internal spectrogram features that can't
-be read back out in our categories. Don't conflate metadata/fingerprinting with
-interpretability.
-
-**v1 implications:** log confident detections so they're ready to be fingerprinted
-later; keep `audio.py` preprocessing as shared, importable code so v2 reuses it.
-
-## Data discipline (locked — these prevent silent failure)
-
-### Split by recording, never by clip
-If you slice a recording into 2s windows and shuffle-split randomly, a window at 04:00
-lands in train and 04:02 (nearly identical) lands in test → the model memorizes, test
-scores look great, real performance tanks. **Whole recordings go entirely to one
-bucket** (train OR val OR test). A 10-ad movie is fine *as long as the whole movie goes
-to one set*. Implication: we need **many distinct recordings** to split cleanly — many
-shorter sessions across channels/times beats one long session.
-
-### Balance the training set only
-Real-world ratio is mostly content, occasional ad. Handle class imbalance **during
-training** (oversample ad windows, or class-weight the loss) — **only on the training
-set**. Leave **val/test at natural, realistic ratios** (mostly content), because that's
-what the phone actually faces. Balancing val/test would make the accuracy number lie.
-
-**Decouple these two:** splitting is by recording (anti-leakage); imbalance is handled
-by sampling/weighting within train (anti-bias). Don't solve imbalance by cherry-picking
-which slices go where — that recreates leakage.
-
-### Identical preprocessing, train and infer
-The most common silent accuracy killer. Dataset building and live inference must
-compute features **identically** — same sample rate, window size, hop, mel params.
-Enforced structurally: **one shared config** (`config/pipeline.yaml`) + **one shared
-`audio.py`** imported everywhere. Never two implementations.
-
-## Eval strategy (locked)
-
-- **Offline eval (primary, fast loop):** model runs **directly on held-out MP4 files** —
-  no re-playing on a TV, no camera. Predict per window, compare to CSV labels.
-  Scriptable, repeatable; ~90% of eval. Because the MP4s were recorded *through the
-  phone*, this eval already includes camera/mic degradation — realistic, not cheating.
-- **Live eval (final validation, infrequent):** phone in front of TV, real playback,
-  end-to-end. Catches real-time effects offline eval misses — rolling-buffer timing,
-  dropped frames, lag, thermal throttling. Slow/manual; used to *validate*, not *iterate*.
-- **Keep dedicated recordings for live eval** that never touched training (like a test
-  set, spent on the real-world run).
-- **Stratified eval:** report accuracy *per ad subtype*, not just overall — catches
-  weaknesses a single number hides.
-
-## Collection pipeline (locked)
-
-**Flow:** `record → split → distribute → label in parallel → merge → normalize → slice → Drive`
-
-### Recording
-- S21, continuous capture, stable framing of the TV. Capture at **full quality** —
-  downsample in processing, never at capture (under-capturing is unrecoverable;
-  downsampling keeps the original).
-- Many sessions across channels/times/lighting for diversity.
-- **Ad-variety risk:** finite ad inventory means you may record the same few spots
-  repeatedly → model memorizes specific ads instead of "ad-ness." Consciously vary
-  channels/times.
-
-### Storage
-- Raw MP4s → **old HDD** (single copy; acceptable for re-recordable TV footage, but a
-  real single-point-of-failure tradeoff).
-- **CSV labels → backed up properly (git/Drive)** — the irreplaceable artifact; never
-  trust them to the HDD alone.
-- Sliced training windows → **Google Drive** (for Colab).
-
-### Splitting (separate script, NOT in the labeler)
-- ffmpeg, **lossless** (`-c copy`), **keyframe-aligned**, **~30-min chunks**, **~30s
-  overlap** between chunks (overlap via per-chunk seek — true overlap isn't native to
-  ffmpeg's segment muxer).
-- **Why split before labeling:** enables **parallel labeling** with a second person —
-  each takes different chunks.
-- **Ownership rule:** label any ad that *starts* in your chunk (the overlap ensures no
-  boundary ad is orphaned).
-- Naming/provenance: `rec007_chunk03` — every chunk traces to its source recording
-  (needed for split-by-recording).
-- **Keyframe honesty:** lossless cuts only land on keyframes, so actual cut points
-  won't be exactly 30:00. The preview must show **real keyframe positions**, not
-  idealized marks, or the preview lies.
-
-### Labeling
-Browser tool in [`labeler/`](labeler/README.md) — the ad-definition rule, subtypes, full
-tool spec, and CSV format live in its README (keep it open while labeling). Mark **ads
-only**; content = the gaps (inferred) — less clicking, fewer mistakes. Seek-heavy
-workflow supported: scrub to find an ad, mark it, move on.
-
-### Processing
-- **Normalize first:** phone MP4s are often variable-framerate and 44.1/48kHz.
-  Re-encode to **constant framerate** + standardized **sample rate** *before* slicing,
-  or alignment breaks.
-- **Audio/video sync:** keep them timestamp-locked from one source of truth; extracting
-  separately risks drift.
-- Sample video to **~5fps** (config), keep **audio dense** (smaller hop). Audio sample
-  rate (kHz) and video frame rate (fps) are distinct knobs — kept separate in config.
-- Slice into **2s windows** (configurable), each inherits its label.
-- Provenance IDs so every window traces to its recording.
-
-## Repo structure (locked)
-
-Monorepo — the whole project context sits behind this one README, with
-function-specific READMEs in subfolders.
+## Repository layout
 
 ```
 ad-detector/
-├── README.md            # this file: SYSTEM DESIGN + canonical BUILD ORDER (authoritative)
-├── CLAUDE.md            # dense pointers for Claude + "don't relitigate" list
-├── plan/                # EXECUTION LOG only (stateful checklists; references this README)
+├── README.md            System design and build order (authoritative)
+├── CLAUDE.md            Orientation notes for AI assistants
+├── plan/                Execution log — stateful checklists, references this README
 ├── config/
-│   └── pipeline.yaml    # THE shared config — read by everything
-├── labeler/             # browser labeling tool (publishable standalone from its subfolder)
-│   ├── src/labeler.ts   # logic (no DOM)
-│   ├── src/ui.ts        # DOM wiring
-│   └── README.md        # ad-definition rule + subtypes (on screen while labeling)
-├── pipeline/            # Python: all data + model work
-│   ├── adbreak/         # importable package = ALL real logic
-│   │   ├── config.py    # loads config/pipeline.yaml → typed object
-│   │   ├── audio.py     # mel features — SHARED by dataset-build AND inference
-│   │   ├── video.py     # frame sampling
-│   │   ├── splitting.py # keyframe-aligned lossless chunking
-│   │   ├── slicing.py   # CSV + recording → labeled windows
-│   │   ├── dataset.py   # split-by-recording, train-only balancing
-│   │   ├── model.py     # architecture
-│   │   └── infer.py     # inference + temporal smoothing
-│   ├── scripts/         # THIN CLI entrypoints (~20 lines: parse args, call into adbreak/)
+│   └── pipeline.yaml    Shared preprocessing config, read by every component
+├── labeler/             Browser-based labeling tool (standalone, publishable)
+│   ├── src/
+│   │   ├── labeler.ts   Segment logic — no DOM
+│   │   └── ui.ts        DOM wiring
+│   └── README.md        Labeling guide + ad definition
+├── pipeline/            Python — all data and model work
+│   ├── adbreak/         Importable package; all real logic lives here
+│   │   ├── config.py    Loads config/pipeline.yaml into a typed object
+│   │   ├── audio.py     Mel features — shared by dataset build and inference
+│   │   ├── video.py     Frame sampling
+│   │   ├── splitting.py Keyframe-aligned lossless chunking
+│   │   ├── slicing.py   CSV + recording → labeled windows
+│   │   ├── dataset.py   Split-by-recording, train-only balancing
+│   │   ├── model.py     Model architecture
+│   │   └── infer.py     Inference + temporal smoothing
+│   ├── scripts/         Thin CLI entry points that call into adbreak/
 │   └── tests/
-├── data/                # gitignored — recordings never committed
-└── models/              # gitignored — trained artifacts never committed
+├── data/                Recordings (git-ignored)
+└── models/              Trained artifacts (git-ignored)
 ```
 
-**Structural principles (locked):**
-- **Logic in the package, CLIs are thin** — same separation as the labeler (logic vs
-  UI); here it's logic vs CLI. Testable and reusable (v2 fingerprinting imports `audio.py`).
-- **One config file, both pipelines read it** — how "identical preprocessing" is
-  *enforced structurally* rather than by discipline.
-- **`audio.py` is shared, single-source.** Dataset building and live inference import
-  the same mel function. Never two implementations.
-- **Colab calls into the package** (`pip install -e`), doesn't copy-paste logic —
-  prevents notebook/repo drift.
-- **`data/` and `models/` gitignored.** Recordings live on the HDD; models are big
-  binaries. Only code + config + labels in git.
+Two conventions keep the codebase maintainable:
 
-## Documentation & planning model
+- **Logic lives in the `adbreak/` package; CLIs and notebooks are thin.** Scripts parse
+  arguments and call in. Colab installs the package (`pip install -e`) rather than
+  copying code, so the notebook and the repo can't drift. The same separation lets v2
+  reuse `audio.py` directly.
+- **One config file feeds both pipelines.** It is the single source of truth for sample
+  rate, window size, hop, mel parameters, video frame rate, and chunk length.
 
-Four doc types, **one source of truth each, no overlap:**
+## Data handling
 
-1. **`README.md`** (this file) — system design **and** canonical build order.
-   **Authoritative.** (No separate DESIGN.md — deliberately folded in to avoid two sources.)
-2. **`plan/`** — **execution log only.** Doesn't *define* sequence; it *references*
-   this README's ordering. Resumable, stateful checklists so work can stop/start anytime.
-   Format and step rules are in [`plan/README.md`](plan/README.md).
-3. **`CLAUDE.md`** — dense pointers + "don't relitigate" list for fast orientation.
-   Facts live once — CLAUDE.md points, never duplicates.
-4. **Per-subfolder READMEs** — function-specific (e.g. `labeler/README.md` holds the
-   ad-definition rule).
+Three rules protect against models that look accurate but aren't:
 
-## Build order (canonical)
+- **Split train/validation/test by recording, never by window.** Adjacent windows from
+  one recording are nearly identical; letting them fall on both sides of a split lets the
+  model memorize instead of generalize. Whole recordings go to exactly one set. This is
+  why the project favors many short, varied recordings over a few long ones.
+- **Balance only the training set.** Class imbalance (mostly content, occasional ad) is
+  handled during training via oversampling or class weighting. Validation and test sets
+  keep their natural ad/content ratio, because that's what the phone actually faces — a
+  balanced test set would report an accuracy the field won't reproduce.
+- **Preprocess identically for training and inference** — enforced by the shared config
+  and shared `audio.py` described above.
 
-1. **Scaffold the repo** — this tree, docs, config stub, git init.
-2. **Splitter** — `pipeline/scripts/split_recording.py` + logic in the package.
-   Preview (length, approx size, real keyframe cut points) → wait for confirmation →
-   progress while splitting → named chunks (`recNNN_chunkNN`).
-3. **Labeler** — per `labeler/README.md` spec. Load MP4 → mark/edit/save ads with
-   category → export CSV → re-import round-trips.
-4. **Collection runs** — phone records while detection is built in parallel.
-5. **Detection pipeline** — normalize/slice/dataset/train/eval (design to be detailed:
-   exact model arch, buffer/smoothing params, runtime wiring, training notebook).
-6. **On-device runtime** — TFLite on the S21, live eval.
-7. **v2** — fingerprint tier + auto-enrollment (parked).
+## Evaluation
 
-Execution status lives in [`plan/README.md`](plan/README.md).
+Day-to-day evaluation runs the model directly against held-out MP4 files and compares
+per-window predictions to the labels. It's fast, scriptable, and — because the files
+were recorded through the phone — already reflects real camera and microphone
+degradation. A separate set of recordings is reserved for this and never used in
+training.
 
-## Scope guardrails (decided & rejected)
+Final validation is run live: the phone in front of a TV, end to end. This catches
+real-time effects the file-based path can't — buffer timing, dropped frames, latency,
+thermal throttling. It's slow and manual, used to confirm rather than to iterate.
 
-Rejected to keep scope tight — don't reintroduce without explicit discussion:
-custom recording app, VLC-driven labeling, in-browser file splitting, frame-perfect
-labeling tools, waveform view, keyboard-shortcut config, separate DESIGN.md,
-`bumper` as its own label subtype.
+Accuracy is reported per ad subtype, not just overall, so weaknesses in a particular
+category aren't hidden inside a single headline number.
+
+## Build order
+
+1. **Scaffold** the repository, docs, and config stub.
+2. **Splitter** — `pipeline/scripts/split_recording.py`. Previews chunk boundaries
+   (duration, approximate size, real keyframe cut points), waits for confirmation, then
+   splits with progress output into named chunks (`recNNN_chunkNN`).
+3. **Labeler** — the browser tool specified in [`labeler/README.md`](labeler/README.md).
+4. **Collection** — recording begins while detection is built in parallel.
+5. **Detection pipeline** — normalization, slicing, dataset assembly, training, offline
+   eval. Model architecture and smoothing parameters to be finalized here.
+6. **On-device runtime** — TFLite on the S21, live evaluation.
+7. **v2** — see below.
+
+This list is the authoritative build order. Live status for each item is tracked in
+[`plan/README.md`](plan/README.md).
+
+## Roadmap (v2)
+
+TV ad inventory is finite and repetitive, which a later version can exploit with a
+two-tier detector: an audio fingerprint library gives instant, near-certain matches on
+ads it has seen before, and the classifier handles anything unrecognized. When the
+classifier confidently identifies a new ad, its fingerprint is added to the library, so
+the system recognizes it instantly next time.
+
+This is deliberately deferred. The fingerprint library is empty on day one, so the
+classifier has to come first and bootstrap it. v1 is built to feed this later — confident
+detections are logged, and preprocessing is shared, importable code.
+
+## Documentation
+
+Each document has one job, to avoid duplicated facts that drift apart:
+
+| File | Role |
+|------|------|
+| `README.md` | System design and build order — authoritative |
+| `plan/` | Execution log; references this README's ordering |
+| `CLAUDE.md` | Condensed orientation for AI assistants |
+| `labeler/README.md`, `pipeline/README.md` | Component-specific detail |
+
+If the execution log and this README ever disagree on design or ordering, this README
+wins.
+
+## Scope
+
+The following were considered and deliberately left out to keep the project focused.
+They shouldn't be reintroduced without explicit discussion: a custom recording app,
+VLC-driven labeling, in-browser file splitting, frame-perfect labeling tools, a waveform
+view, and configurable keyboard shortcuts.

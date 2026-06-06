@@ -1,0 +1,22 @@
+# THE shared config — single source of truth for every knob that must match
+# between dataset building and live inference. Read by everything (Python
+# pipeline now; mirror manually into the Android app config when that exists).
+#
+# "Identical preprocessing, train and infer" is enforced structurally:
+# this file + pipeline/adbreak/audio.py are the ONLY places these values and
+# the feature computation live. Never duplicate them in scripts or notebooks.
+
+audio:
+  sample_rate: 16000      # Hz, mono. YAMNet expects 16 kHz. Distinct knob from video fps.
+  window_seconds: 2.0     # classification window length
+  hop_seconds: 0.5        # stride between windows — audio stays dense
+  n_fft: 1024
+  hop_length: 320         # STFT hop in samples (20 ms @ 16 kHz)
+  n_mels: 64
+
+video:
+  fps: 5                  # sampled frame rate (~5fps). Separate knob from audio sample rate.
+
+splitting:
+  chunk_minutes: 30       # target chunk length; actual cuts land on real keyframes
+  overlap_seconds: 30     # overlap between consecutive chunks (per-chunk seek, "option B")

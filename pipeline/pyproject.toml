@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools==69.5.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adbreak"
+version = "0.1.0"
+description = "ad-detector data + model pipeline (all real logic; scripts/ are thin CLIs)"
+requires-python = ">=3.10"
+# Exact pins, slightly-aged known-good versions. ML deps (tensorflow, librosa, ...)
+# get added when the detection pipeline is built — don't pre-install what we don't use.
+dependencies = [
+    "PyYAML==6.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.2.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["adbreak*"]

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>ad-labeler</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 1.5rem auto; max-width: 880px; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; }
+  video { width: 100%; max-height: 420px; background: #000; border-radius: 6px; }
+  fieldset { border: 1px solid #ccc; border-radius: 6px; margin: 1rem 0; }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .4rem 0; }
+  .row label { min-width: 4.5rem; font-weight: 600; }
+  input[type="text"] { width: 6.5rem; padding: .25rem .4rem; }
+  button { padding: .3rem .7rem; cursor: pointer; }
+  .nudge { padding: .3rem .5rem; }
+  .status { min-height: 1.3em; margin: .5rem 0; color: #2a7a2a; }
+  .status.error { color: #b00020; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border-bottom: 1px solid #ddd; padding: .35rem .5rem; text-align: left; }
+  .time-edit { width: 5.5rem; }
+  .jump { margin-left: .4rem; font-size: .85em; }
+  details { background: #f6f6ee; border-radius: 6px; padding: .6rem .9rem; margin: 1rem 0; }
+  summary { font-weight: 600; cursor: pointer; }
+  .muted { color: #666; font-size: .9em; }
+</style>
+</head>
+<body>
+<h1>ad-labeler</h1>
+<p class="muted">Everything runs locally in your browser — the video never leaves your machine. No uploads, no tracking.</p>
+
+<details open>
+  <summary>What counts as an ad (keep this rule in mind — full version in README)</summary>
+  <p>Anything that <strong>interrupts the program the way a commercial break does</strong> —
+  paid spots, infomercials/shopping segments, and channel self-promos / "up next" / bumpers.
+  In-program sponsorship counts <em>only</em> with a clear separable signal (on-screen
+  "Ad"/"Sponsored" marker or a distinct break). Brand mentions and product placement stay content.</p>
+  <p><strong>Tie-breaker:</strong> interrupts like a commercial break <em>and</em> has a detectable
+  signal → ad; otherwise content. Subtype unclear after ~2s → <code>other</code>, move on.</p>
+</details>
+
+<div class="row">
+  <input type="file" id="file-input" accept="video/mp4,video/*" />
+  <span id="filename" class="muted"></span>
+</div>
+
+<video id="video" controls preload="metadata"></video>
+
+<fieldset>
+  <legend>Mark an ad (times in seconds; mm:ss accepted when typing)</legend>
+  <div class="row">
+    <label>Start</label>
+    <button id="mark-start">Mark Ad Start</button>
+    <input type="text" id="start-field" placeholder="—" />
+    <button id="start-minus" class="nudge" title="−0.5s">−0.5</button>
+    <button id="start-plus" class="nudge" title="+0.5s">+0.5</button>
+  </div>
+  <div class="row">
+    <label>End</label>
+    <button id="mark-end">Mark Ad End</button>
+    <input type="text" id="end-field" placeholder="—" />
+    <button id="end-minus" class="nudge" title="−0.5s">−0.5</button>
+    <button id="end-plus" class="nudge" title="+0.5s">+0.5</button>
+  </div>
+  <div class="row">
+    <label>Type</label>
+    <select id="type-select">
+      <option value="commercial" selected>commercial</option>
+      <option value="promo">promo</option>
+      <option value="sponsored">sponsored</option>
+      <option value="other">other</option>
+    </select>
+    <button id="save-ad"><strong>Save Ad</strong></button>
+  </div>
+</fieldset>
+
+<div id="status" class="status"></div>
+
+<table>
+  <thead>
+    <tr><th>start (s)</th><th>end (s)</th><th>type</th><th></th></tr>
+  </thead>
+  <tbody id="segments-body"></tbody>
+</table>
+
+<div class="row" style="margin-top:1rem">
+  <button id="export-csv">Export CSV</button>
+  <button id="import-csv">Import CSV</button>
+  <input type="file" id="import-input" accept=".csv,text/csv" hidden />
+</div>
+
+<script src="dist/app.js"></script>
+</body>
+</html>

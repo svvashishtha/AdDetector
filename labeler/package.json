@@ -1,0 +1,16 @@
+{
+  "name": "ad-labeler",
+  "version": "0.1.0",
+  "description": "Browser tool to label ad segments in local TV recordings. Everything runs locally — no uploads, no tracking.",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "build": "esbuild src/ui.ts --bundle --format=iife --outfile=dist/app.js",
+    "watch": "esbuild src/ui.ts --bundle --format=iife --outfile=dist/app.js --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "0.21.5",
+    "typescript": "5.4.5"
+  }
+}

@@ -1,0 +1,35 @@
+# recordings & datasets live on the HDD / Drive, never in git
+data/*
+!data/.gitkeep
+
+# trained artifacts are big binaries, never in git
+models/*
+!models/.gitkeep
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# notebooks
+.ipynb_checkpoints/
+
+# stray media/model artifacts outside data/ & models/
+*.mp4
+*.tflite
+
+# node
+node_modules/
+labeler/dist/
+
+# claude code local settings
+.claude/settings.local.json
